@@ -7,6 +7,7 @@
 
 import configparser
 import csv
+import fcntl
 import gzip
 import json
 import logging
@@ -20,31 +21,53 @@ import xml.etree.ElementTree as ET
 from operator import itemgetter
 from pathlib import Path, PurePath
 
+class lock:
+    def __init__(self, name ):
+        self.name = name
+
+    def __enter__(self ):
+        # acquire this lock:
+        self.fobj = open( f'/tmp/tdquotes_{self.name}.lck', "wb" )
+        starttime = int( time.time() )
+        fcntl.flock( self.fobj.fileno(), fcntl.LOCK_EX )
+        locktime = int( time.time() ) - starttime
+        if locktime > 1:
+            logger.debug( f'Waited {locktime} seconds to acquire {self.name} lock')
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        #  release the lock:
+        fcntl.flock( self.fobj.fileno(), fcntl.LOCK_UN )
+        self.fobj.close()
+        return None
+
 # default path name of our config file:
-gbl_configfile = Path.home() / '.config' / 'tdquotes.conf'
-gbl_config = configparser.ConfigParser()
-gbl_logger = logging.getLogger( __name__ )
+configfile = Path.home() / '.config' / 'tdquotes.conf'
+config = configparser.ConfigParser()
+logger = logging.getLogger( __name__ )
+
+quotelock = lock( 'quotelock' )       # lock to single thread quote retrievals
+csvlock   = lock( 'csvlock' )         # lock to single thread csv file updates
 
 def main():
-    global gbl_logger, gbl_configfile
+    global configfile
 
     #  Set config defaults:
-    gbl_config['Settings'] = {'quotetime': '0',
+    config['Settings'] = {'quotetime': '0',
                            'delay'    : '8'}
-    gbl_config['Logging']  = {'loglevel': 'ERROR'}
-    gbl_config['Quotes']   = {'csvfile' : ''}
+    config['Logging']  = {'loglevel': 'ERROR'}
+    config['Quotes']   = {'csvfile' : ''}
 
     # find our config file - return with error if it doesn't exist
-    gbl_configfile = getconfigfile()
-    if  not gbl_configfile:
+    configfile = getconfigfile()
+    if not configfile:
         return 0
 
-    gbl_config.read( gbl_configfile )
-    gbl_config.sections()
+    config.read( configfile )
+    config.sections()
 
     #  Initialize the logger:
-    if  gbl_config.has_option( 'Logging', 'logfile' ):
-        logfile = gbl_config['Logging']['logfile']
+    if  config.has_option( 'Logging', 'logfile' ):
+        logfile = config['Logging']['logfile']
         if  logfile.lower() == 'syslog':
             handler = logging.handlers.SysLogHandler( address='/dev/log' )
         else:
@@ -52,7 +75,7 @@ def main():
     else:
         handler = logging.NullHandler()
 
-    gbl_logger.addHandler( handler )
+    logger.addHandler( handler )
 
     try:
         logging.basicConfig( style='{',
@@ -61,15 +84,15 @@ def main():
     except Exception as e:
         printerror( f'Unable to initialize log: {e}' )
 
-    loglevel = gbl_config['Logging']['loglevel']
+    loglevel = config['Logging']['loglevel']
     try:
-        gbl_logger.setLevel( loglevel )
+        logger.setLevel( loglevel )
     except ValueError as e:
         printerror( f'Error setting log level: {e}' )
-        gbl_logger.setLevel( logging.ERROR )
+        logger.setLevel( logging.ERROR )
 
-    if not gbl_config.has_option( 'Settings', 'APIkey' ):
-        printerror( f'Your config file - {gbl_configfile} - must specify your Twelve Data API key' )
+    if not config.has_option( 'Settings', 'APIkey' ):
+        printerror( f'Your config file - {configfile} - must specify your Twelve Data API key' )
         return 0
 
     if len( sys.argv ) < 2:
@@ -93,8 +116,8 @@ def main():
 
         # emit the date & price to kmymoney:
         strout = f'price="{price}" date="{date}"'
-        gbl_logger.debug( 'reply to Kmymoney:' )
-        gbl_logger.debug( strout )
+        logger.debug( 'reply to Kmymoney:' )
+        logger.debug( strout )
         print( strout )
 
     return 0
@@ -103,15 +126,15 @@ def getconfigfile():
     """
         Find "tdquotes.conf" if it exists.  If not, issue an error and return None
     """
-    if  gbl_configfile.exists():
-        configfile = gbl_configfile
+    if  configfile.exists():
+        file = configfile
     else:
-        configfile = Path( sys.argv[0] ).parent / "tdquotes.conf"
-        if  not configfile.exists():
-            printerror( f'A config file of {gbl_configfile} or {configfile} with your Twelve Data API key is required' )
-            configfile = None
+        file = Path( sys.argv[0] ).parent / "tdquotes.conf"
+        if  not file.exists():
+            printerror( f'A config file of {file} or {configfile} with your Twelve Data API key is required' )
+            file = None
 
-    return configfile
+    return file
 
 
 
@@ -123,23 +146,21 @@ def fetchquote( ticker ):
        If a csv file is not configured, does not exist, or has no quote for the input ticker,
        get a quote directly from Twelve Data
     """
-    csvfilename = gbl_config['Quotes']['csvfile']
+    csvfilename = config['Quotes']['csvfile']
     date = price = None
     if  csvfilename  and  Path( csvfilename ).exists():
-        rows = csvread( csvfilename )
-        for ix, row in enumerate(rows):
-            if  row[0] == ticker:
-                date = row[1]
-                price = row[2]
-                gbl_logger.info( f'Quote for {ticker} retrieved from {csvfilename}: price={price}, date={date}' )
-                
-                #  delete the row we just read from the csv file and update it: 
-                del rows[ix]
-                with  open( csvfilename, 'w', newline='' ) as csvfile:
-                    writer = csv.writer( csvfile, delimiter=',', quotechar='"', quoting=csv.QUOTE_ALL )
-                    writer.writerows( rows )
+        with csvlock:
+            rows = csvread( csvfilename )
+            for ix, row in enumerate(rows):
+                if  row[0] == ticker:
+                    date = row[1]
+                    price = row[2]
+                    logger.info( f'Quote for {ticker} retrieved from {csvfilename}: price={price}, date={date}' )
 
-                break
+                    #  delete the row we just read from the csv file and update it:
+                    del rows[ix]
+                    csvwrite( csvfilename, rows )
+                    break
 
     # if we couldn't get a quote from the csvfile, fetch directly from twelve data:
     if  date is None or price is None:
@@ -151,25 +172,29 @@ def tdquote( ticker, count=0, total=0 ):
     """
       Retrieve a quote from twelvedata.com for the input ticker symbol.  Wait if necessary
     """
-    apikey = gbl_config['Settings']['apikey']
+    apikey = config['Settings']['apikey']
     url = f'https://api.twelvedata.com/eod?symbol={ticker}&apikey={apikey}'
     req = urllib.request.Request( url )
     req.add_header( 'User-agent', 'Mozilla/5.0' )
 
-    gbl_logger.debug( f'URL to retrieve {ticker}: {url}' )
+    logger.debug( f'URL to retrieve {ticker}: {url}' )
 
-    waittime = tddelay( 'wait' )
+    #  If a --retrieve call is running at the same time a kmm user is downloading quotes with --fetch calls, we could
+    #  have problems here - we could retrieve too many quotes from twelve data and experience failures or (maybe??)
+    #  have our API key revoked. So we single thread through the quote retrieval from twelve data here.
+    with quotelock:
+        waittime = tddelay( 'wait' )
 
-    try:
-        with urllib.request.urlopen( req ) as response:
-            mktdata = response.read().decode()
-    except urllib.error.URLError as e:
-        printerror( f'URLError on URL for {ticker}\n{url}:\nError: {e.reason}' )
-        return None, None
+        try:
+            with urllib.request.urlopen( req ) as response:
+                mktdata = response.read().decode()
+        except urllib.error.URLError as e:
+            printerror( f'URLError on URL for {ticker}\n{url}:\nError: {e.reason}' )
+            return None, None
 
-    tddelay( 'update' )
+        tddelay( 'update' )
 
-    gbl_logger.debug( f'twelvedata.com response:\n{mktdata}' )
+    logger.debug( f'twelvedata.com response:\n{mktdata}' )
 
     try:
         quote = json.loads( mktdata )
@@ -186,10 +211,10 @@ def tdquote( ticker, count=0, total=0 ):
         return None, None
 
     if  count > 0:
-        gbl_logger.info( f'{count} of {total} quotes: {ticker} from twelvedata.com date:{date}  price:{price}, '
+        logger.info( f'{count} of {total} quotes: {ticker} from twelvedata.com date:{date}  price:{price}, '
                      f'waited {waittime} seconds' )
     else:
-        gbl_logger.info( f'{ticker} from twelvedata.com date:{date}  price:{price}, waited {waittime} seconds' )
+        logger.info( f'{ticker} from twelvedata.com date:{date}  price:{price}, waited {waittime} seconds' )
 
     return date, price
 
@@ -205,23 +230,23 @@ def tddelay(request):
     """
     waittime = 0
     if request == 'wait':
-        quotetime = int( gbl_config['Settings']['quotetime'] )
-        delay = int( gbl_config['Settings']['delay'] )
+        quotetime = int( config['Settings']['quotetime'] )
+        delay = int( config['Settings']['delay'] )
         if quotetime:
             interval = int(time.time()) - quotetime
             if interval < delay:
                 waittime = delay - interval
-                gbl_logger.debug( f'Sleeping {waittime} seconds before retrieving quote' )
+                logger.debug( f'Sleeping {waittime} seconds before retrieving quote' )
                 time.sleep( waittime )
 
     elif request == 'update':
         #  update quotetime in the config file:
-        gbl_config['Settings']['quotetime'] = str( int( time.time() ) )
+        config['Settings']['quotetime'] = str( int( time.time() ) )
         try:
-            with  open( gbl_configfile, 'w' ) as cf:
-                gbl_config.write( cf )
+            with  open( configfile, 'w' ) as cf:
+                config.write( cf )
         except OSError as e:
-            printerror( f'Unable to update quote time in {gbl_configfile}\n{e.strerror}' )
+            printerror( f'Unable to update quote time in {configfile}\n{e.strerror}' )
 
     return waittime
 
@@ -229,45 +254,47 @@ def retrievequotes():
     """
         Retrieve configured quotes and place them in a .csv file
     """
-    csvfilename = gbl_config['Quotes']['csvfile']
+    csvfilename = config['Quotes']['csvfile']
     if not csvfilename:
         printerror( "A config setting of [Quotes], csvfile = /path/to/csvfile is required to retrieve multiple quotes" )
         return None
 
     #  Get ticker symbols, either from our config file or kmymoney file:
-    if  gbl_config.has_option( 'Quotes', 'symbols' ):
-        symbols = gbl_config['Quotes']['symbols'].split()
-    elif  gbl_config.has_option( 'Quotes', 'kmmfile' ):
-        symbols = getkmmtickers( gbl_config['Quotes']['kmmfile'] )
+    if  config.has_option( 'Quotes', 'symbols' ):
+        symbols = config['Quotes']['symbols'].split()
+    elif  config.has_option( 'Quotes', 'kmmfile' ):
+        symbols = getkmmtickers( config['Quotes']['kmmfile'] )
     else:
         printerror( 'Config setting "symbols" or "kmmfile" is required to retrieve multiple quotes' )
         return None
 
     #  Remove any excluded symbols
-    if  gbl_config.has_option( 'Quotes', 'exclude' ):
-        exclude = gbl_config['Quotes']['exclude'].split()
+    if  config.has_option( 'Quotes', 'exclude' ):
+        exclude = config['Quotes']['exclude'].split()
         for excluded in exclude:
             if  excluded in symbols: symbols.remove(excluded)
 
-    gbl_logger.info( f'Retrieving {len( symbols )} quotes for: {symbols}' )
+    logger.info( f'Retrieving {len( symbols )} quotes for: {symbols}' )
 
-    rows = csvread( csvfilename )
-
+    quotes = []
     for i, ticker in enumerate( symbols, start=1 ) :
-        date, price = tdquote( ticker, i, len(symbols) )
-        if  date and price:
-            for row in rows:
-                if  ticker == row[0]  and date == row[1]:
-                    row[2] = price
-                    break
-            else:
-                rows.append( [ticker, date, price] )
+        quotes.append( [ticker, tdquote( ticker, i, len(symbols) )] )
 
-    rows.sort( key=itemgetter(0,1) )
+    with csvlock:
+        rows = csvread( csvfilename )
 
-    with  open( csvfilename, 'w', newline='' ) as csvfile:
-        writer = csv.writer( csvfile, delimiter=',', quotechar='"', quoting=csv.QUOTE_ALL )
-        writer.writerows( rows )
+        for  ticker, (date, price) in quotes:
+            if  date and price:
+                for row in rows:
+                    if  ticker == row[0]  and date == row[1]:
+                        row[2] = price
+                        break
+                else:
+                    rows.append( [ticker, date, price] )
+
+        rows.sort( key=itemgetter(0,1) )
+
+        csvwrite( csvfilename, rows )
 
 def getkmmtickers(kmmfile):
     """
@@ -317,13 +344,19 @@ def  csvread( file ):
             rows = [ row for row in reader ]
     return rows
 
-
+def csvwrite( file, rows ):
+    """
+        Write the input rows[] to the input csv file.  
+    """
+    with  open( file, 'w', newline='' ) as csvfile:
+        writer = csv.writer( csvfile, delimiter=',', quotechar='"', quoting=csv.QUOTE_ALL )
+        writer.writerows( rows )
 def printerror( message ):
     """
        Print an error message to the log and stderr.
     """
     print( message, file=sys.stderr )
-    if gbl_logger: gbl_logger.error( message )
+    if logger: logger.error( message )
 
 if __name__ == '__main__':
     sys.exit( main() )
