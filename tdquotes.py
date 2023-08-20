@@ -225,8 +225,8 @@ def tddelay(request):
 
             Input request -
                 'wait': wait before retrieving another quote.
-                'update': update the quote retrieval time stamp in the config file as the current time in seconds since start
-                    of epoch.
+                'update': update the quote retrieval time stamp in the config file as the current time in seconds since
+                    start of epoch.
     """
     waittime = 0
     if request == 'wait':
@@ -280,6 +280,9 @@ def retrievequotes():
     for i, ticker in enumerate( symbols, start=1 ) :
         quotes.append( [ticker, tdquote( ticker, i, len(symbols) )] )
 
+    #  Update the csv file with the quotes we just retrieved.
+    #  for each quote: if we already have a matching symbol and date in the csv file, update the price.
+    #       otherwise, add the new quote to the csv file
     with csvlock:
         rows = csvread( csvfilename )
 
@@ -301,7 +304,7 @@ def getkmmtickers(kmmfile):
         Retrieve all investment ticker symbols with an online source matching the name of this script,
         from the input kmymoney database
     """
-    myname = PurePath( sys.argv[0] ).stem.lower()
+    myname = PurePath( sys.argv[0] ).stem.lower()       # file name of this script
 
     try:
         with gzip.open( kmmfile, 'rb' ) as kmy:
