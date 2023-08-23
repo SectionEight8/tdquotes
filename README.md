@@ -68,7 +68,7 @@ The "`tdquotes --retrieve`" option can retrieve a number of pre-configured quote
 
 The following settings, in the [Quotes] section of tdquotes.conf, are required to use the `--retrieve` option:
 
-To specify the ticker symbols to be retrieved, either specify the symbols directly using the "symbols" setting, or specify your kMyMoney database using the "kmmfile" setting. One of these is required. If both are set, "symbols" is used and "kmmfile" is ignored.
+To specify the ticker symbols to be retrieved, either specify the symbols directly using the "symbols" setting, or specify your KMyMoney database using the "kmmfile" setting. One of these is required. If both are set, "symbols" is used and "kmmfile" is ignored.
 
 Specify the ticker symbols whose quotes will be retrieved using the "symbols" setting:
 
